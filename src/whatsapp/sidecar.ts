@@ -3,20 +3,73 @@ import whatsapp from "whatsapp-web.js";
 const { Client, LocalAuth } = whatsapp;
 import type { Message as WAMessage } from "whatsapp-web.js";
 import QRCode from "qrcode";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { resolve, dirname } from "path";
 import { config } from "dotenv";
 
 config();
 
 const PORT = parseInt(process.env.SIDECAR_PORT || "3001", 10);
+const MESSAGES_PATH = resolve(process.cwd(), "data", "messages.json");
+
+// --- Persistent Message Store ---
+
+interface StoredMessage {
+  body: string;
+  timestamp: string;
+  rawSender: string; // Original sender ID (e.g. @lid, @c.us)
+}
+
+// Map<normalizedPhoneNumber@c.us, StoredMessage[]>
+let incomingMessages: Record<string, StoredMessage[]> = {};
+
+function ensureDataDir(): void {
+  const dir = dirname(MESSAGES_PATH);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+}
+
+function loadMessages(): void {
+  ensureDataDir();
+  if (existsSync(MESSAGES_PATH)) {
+    try {
+      const raw = readFileSync(MESSAGES_PATH, "utf-8");
+      incomingMessages = JSON.parse(raw);
+      console.error(`[Store] Loaded ${Object.keys(incomingMessages).length} contacts from disk.`);
+    } catch {
+      console.error("[Store] Failed to parse messages.json, starting fresh.");
+      incomingMessages = {};
+    }
+  }
+}
+
+function persistMessages(): void {
+  ensureDataDir();
+  writeFileSync(MESSAGES_PATH, JSON.stringify(incomingMessages, null, 2));
+}
+
+function storeMessage(resolvedKey: string, msg: StoredMessage): void {
+  if (!incomingMessages[resolvedKey]) {
+    incomingMessages[resolvedKey] = [];
+  }
+  incomingMessages[resolvedKey].push(msg);
+  // Keep last 50 messages per contact
+  if (incomingMessages[resolvedKey].length > 50) {
+    incomingMessages[resolvedKey] = incomingMessages[resolvedKey].slice(-50);
+  }
+  persistMessages();
+}
+
+// --- LID Resolution Cache ---
+// Maps @lid IDs to resolved @c.us phone numbers so we don't re-resolve every message
+const lidCache = new Map<string, string>();
 
 // --- WhatsApp Client Setup ---
 
 let isConnected = false;
 let currentQR: string | null = null;
 let qrDataUrl: string | null = null;
-
-// Store incoming messages: Map<senderNumber, Message[]>
-const incomingMessages = new Map<string, { body: string; timestamp: string }[]>();
 
 const client = new Client({
   authStrategy: new LocalAuth(),
@@ -57,19 +110,73 @@ client.on("disconnected", (reason: string) => {
   console.error("[WhatsApp] Disconnected:", reason);
 });
 
-client.on("message", (msg: WAMessage) => {
-  const sender = msg.from;
-  const existing = incomingMessages.get(sender) || [];
-  existing.push({
+// --- Message Handler: Resolve @lid → phone number, then store ---
+
+client.on("message", async (msg: WAMessage) => {
+  const rawSender = msg.from;
+
+  // Skip empty messages and status broadcasts
+  if (!msg.body || msg.body.trim().length === 0) return;
+  if (rawSender === "status@broadcast") return;
+
+  let resolvedKey = rawSender;
+
+  // If sender is a @lid (Linked Device ID), resolve to actual phone number
+  if (rawSender.includes("@lid")) {
+    // Check cache first
+    const cached = lidCache.get(rawSender);
+    if (cached) {
+      resolvedKey = cached;
+    } else {
+      try {
+        const contact = await msg.getContact();
+        // Log all useful contact fields for debugging
+        console.error(`[WhatsApp] Contact for LID ${rawSender}: id=${JSON.stringify(contact?.id)}, number=${contact?.number}, pushname=${contact?.pushname}`);
+
+        // Try multiple resolution strategies
+        const phone =
+          // 1. contact.number (sometimes returns the lid number, not phone)
+          (contact?.number && !contact.number.startsWith("1") ? contact.number : null) ||
+          // 2. contact.id.user if it looks like a phone number
+          (contact?.id?.user && contact.id.user.length >= 10 && contact.id._serialized?.includes("@c.us")
+            ? contact.id.user
+            : null);
+
+        if (phone) {
+          resolvedKey = `${phone}@c.us`;
+          lidCache.set(rawSender, resolvedKey);
+          console.error(`[WhatsApp] Resolved LID ${rawSender} → ${resolvedKey}`);
+        } else {
+          // Fallback: try to get the chat and resolve from there
+          try {
+            const chat = await msg.getChat();
+            const chatId = (chat as any).id?.user;
+            if (chatId && chatId.length >= 10) {
+              resolvedKey = `${chatId}@c.us`;
+              lidCache.set(rawSender, resolvedKey);
+              console.error(`[WhatsApp] Resolved LID via chat ${rawSender} → ${resolvedKey}`);
+            } else {
+              console.error(`[WhatsApp] Could not resolve LID ${rawSender}, storing under raw key. Chat ID: ${JSON.stringify((chat as any).id)}`);
+            }
+          } catch (chatErr) {
+            console.error(`[WhatsApp] Chat fallback failed for ${rawSender}: ${chatErr}`);
+          }
+        }
+      } catch (err) {
+        console.error(`[WhatsApp] Failed to resolve LID ${rawSender}: ${err}`);
+        // Store under raw key as fallback — better than losing the message
+      }
+    }
+  }
+
+  const storedMsg: StoredMessage = {
     body: msg.body,
     timestamp: new Date().toISOString(),
-  });
-  // Keep only last 20 messages per sender
-  if (existing.length > 20) {
-    existing.splice(0, existing.length - 20);
-  }
-  incomingMessages.set(sender, existing);
-  console.error(`[WhatsApp] Message from ${sender}: ${msg.body.substring(0, 100)}`);
+    rawSender,
+  };
+
+  storeMessage(resolvedKey, storedMsg);
+  console.error(`[WhatsApp] Message from ${resolvedKey}: ${msg.body.substring(0, 100)}`);
 });
 
 // --- Express Server ---
@@ -157,7 +264,7 @@ app.post("/send", async (req, res) => {
   }
 });
 
-// Check replies from specific numbers
+// Check replies — exact match by normalized @c.us key
 app.get("/replies", (req, res) => {
   const numbersParam = (req.query.numbers as string) || "";
   const numbers = numbersParam
@@ -166,21 +273,18 @@ app.get("/replies", (req, res) => {
     .filter(Boolean);
 
   if (numbers.length === 0) {
-    // Return all incoming messages
-    const all: Record<string, { body: string; timestamp: string }[]> = {};
-    for (const [key, value] of incomingMessages) {
-      all[key] = value;
-    }
-    res.json({ replies: all });
+    // Return all messages
+    res.json({ replies: incomingMessages });
     return;
   }
 
-  const result: Record<string, { body: string; timestamp: string }[]> = {};
+  const result: Record<string, StoredMessage[]> = {};
   for (const num of numbers) {
-    const chatId = num.includes("@c.us") ? num : `${num}@c.us`;
-    const messages = incomingMessages.get(chatId) || [];
-    if (messages.length > 0) {
-      result[chatId] = messages;
+    // Normalize to @c.us format
+    const key = num.includes("@") ? num : `${num}@c.us`;
+    const messages = incomingMessages[key];
+    if (messages && messages.length > 0) {
+      result[key] = messages;
     }
   }
   res.json({ replies: result });
@@ -189,6 +293,7 @@ app.get("/replies", (req, res) => {
 // --- Start ---
 
 console.error(`[Sidecar] Starting WhatsApp sidecar on port ${PORT}...`);
+loadMessages();
 client.initialize();
 
 app.listen(PORT, () => {

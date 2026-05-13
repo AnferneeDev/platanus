@@ -43,6 +43,27 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Returns the earliest outbound message timestamp for a contact.
+ * Uses leads.json to find when we first messaged them.
+ * If not in leads.json, returns null (we never messaged them).
+ */
+function getFirstContactTime(phone: string): string | null {
+  const store = loadStore();
+  const lead = store.leads.find(
+    (l) => l.phone === phone || l.phoneFormatted === phone || l.phoneFormatted === `${phone}@c.us`
+  );
+  if (!lead) return null;
+
+  const outbound = lead.messages.filter((m) => m.direction === "outbound");
+  if (outbound.length === 0) return null;
+
+  return outbound.reduce((earliest, m) =>
+    m.timestamp < earliest ? m.timestamp : earliest,
+    outbound[0].timestamp
+  );
+}
+
 export async function checkWhatsappReplies(
   phoneNumbers?: string[],
   waitSeconds = 5
@@ -78,13 +99,48 @@ export async function checkWhatsappReplies(
 
     // Check for real replies
     const result = await getReplies(formattedNumbers);
-    const realReplies = result.replies;
+    const rawReplies = result.replies;
 
-    const hasRealReplies = Object.keys(realReplies).length > 0;
+    // Filter replies: only keep messages received AFTER we first contacted them
+    // This ensures we don't show old messages from before the negotiation started.
+    // For numbers not in leads.json (no outbound recorded), include all messages
+    // but warn that the contact isn't tracked.
+    const filteredReplies: Record<string, { body: string; timestamp: string }[]> = {};
+    const untrackedNumbers: string[] = [];
+
+    for (const num of formattedNumbers) {
+      const rawNumber = num.replace("@c.us", "");
+      const firstContact = getFirstContactTime(rawNumber);
+
+      if (!firstContact) {
+        // Never messaged this number via send_whatsapp_message
+        // But if there are real replies (manual/test scenario), still show them
+        const msgs = rawReplies[num];
+        if (msgs && msgs.length > 0) {
+          filteredReplies[num] = msgs;
+          untrackedNumbers.push(rawNumber);
+        }
+        continue;
+      }
+
+      const contactTimeMs = new Date(firstContact).getTime();
+      const msgs = rawReplies[num];
+      if (msgs && msgs.length > 0) {
+        const newMsgs = msgs.filter((m) => {
+          const msgTime = new Date(m.timestamp).getTime();
+          return msgTime >= contactTimeMs - 5000; // 5s buffer for clock skew
+        });
+        if (newMsgs.length > 0) {
+          filteredReplies[num] = newMsgs;
+        }
+      }
+    }
+
+    const hasRealReplies = Object.keys(filteredReplies).length > 0;
 
     if (hasRealReplies) {
       // Log real replies to store
-      for (const [sender, messages] of Object.entries(realReplies)) {
+      for (const [sender, messages] of Object.entries(filteredReplies)) {
         for (const msg of messages) {
           addMessage(sender, {
             direction: "inbound",
@@ -94,10 +150,15 @@ export async function checkWhatsappReplies(
         }
       }
 
+      const extra = untrackedNumbers.length > 0
+        ? ` (${untrackedNumbers.length} numbers are not in leads yet — replies shown anyway)`
+        : "";
+
       return JSON.stringify({
-        message: `Received real replies from ${Object.keys(realReplies).length} contact(s).`,
-        replies: realReplies,
+        message: `Received real replies from ${Object.keys(filteredReplies).length} contact(s).${extra}`,
+        replies: filteredReplies,
         simulated: false,
+        filterNote: "Only showing replies received after the first outbound message was sent to each contact.",
       });
     }
 
