@@ -88,7 +88,7 @@ export async function findLocalBusiness(
   if (!API_KEY) {
     return JSON.stringify({
       error:
-        "GOOGLE_PLACES_API_KEY is not configured. Set it in your .env file.",
+        "GOOGLE_PLACES_API_KEY is not configured. Ask the user for the business phone number directly, then use send_whatsapp_message or start_negotiation with that number.",
     });
   }
 
