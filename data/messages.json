@@ -76,6 +76,26 @@
       "body": "Deal, what's the address",
       "timestamp": "2026-05-14T00:31:32.155Z",
       "rawSender": "126457544233173@lid"
+    },
+    {
+      "body": "Cuál es su experiencia laboral?",
+      "timestamp": "2026-05-14T02:59:42.102Z",
+      "rawSender": "126457544233173@lid"
+    },
+    {
+      "body": "No",
+      "timestamp": "2026-05-14T02:59:54.512Z",
+      "rawSender": "126457544233173@lid"
+    },
+    {
+      "body": "No puedo darte más de 100 bolívares",
+      "timestamp": "2026-05-14T03:00:07.708Z",
+      "rawSender": "126457544233173@lid"
+    },
+    {
+      "body": "No puedo",
+      "timestamp": "2026-05-14T03:10:11.225Z",
+      "rawSender": "126457544233173@lid"
     }
   ],
   "201035205911@c.us": [
@@ -145,6 +165,21 @@
       "body": "No podría porque los pasteleros no son piedreros para aceptar menos dinero",
       "timestamp": "2026-05-13T23:39:27.906Z",
       "rawSender": "193720322388041@lid"
+    },
+    {
+      "body": "Todo may brodel",
+      "timestamp": "2026-05-14T03:11:28.285Z",
+      "rawSender": "193720322388041@lid"
+    },
+    {
+      "body": "Estaba durmiendo",
+      "timestamp": "2026-05-14T03:11:31.264Z",
+      "rawSender": "193720322388041@lid"
+    },
+    {
+      "body": "Qué pasó?",
+      "timestamp": "2026-05-14T03:11:34.949Z",
+      "rawSender": "193720322388041@lid"
     }
   ],
   "966581472165@c.us": [
@@ -182,6 +217,42 @@
       "body": "الطهاة المحليين افضل",
       "timestamp": "2026-05-13T23:50:06.597Z",
       "rawSender": "100944616407107@lid"
+    }
+  ],
+  "24786424086644@c.us": [
+    {
+      "body": "Hola clarooo",
+      "timestamp": "2026-05-14T03:02:03.091Z",
+      "rawSender": "24786424086644@lid"
+    },
+    {
+      "body": "Sii",
+      "timestamp": "2026-05-14T03:09:18.117Z",
+      "rawSender": "24786424086644@lid"
+    }
+  ],
+  "584225446784@c.us": [
+    {
+      "body": "Vete a Mérida bro",
+      "timestamp": "2026-05-14T03:15:30.912Z",
+      "rawSender": "12361620553750@lid"
+    },
+    {
+      "body": "Me anoto",
+      "timestamp": "2026-05-14T03:15:48.943Z",
+      "rawSender": "12361620553750@lid"
+    }
+  ],
+  "584241928802@c.us": [
+    {
+      "body": "Sii",
+      "timestamp": "2026-05-14T03:16:48.749Z",
+      "rawSender": "24786424086644@lid"
+    },
+    {
+      "body": "People",
+      "timestamp": "2026-05-14T03:17:15.146Z",
+      "rawSender": "24786424086644@lid"
     }
   ]
 }

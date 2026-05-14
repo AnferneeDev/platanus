@@ -4,17 +4,17 @@
   "description": "MCP server that gives AI agents the ability to discover local businesses and negotiate with them via WhatsApp",
   "type": "module",
   "bin": {
-    "agentic-procurement": "./dist/index.js",
-    "agentic-procurement-sidecar": "./dist/whatsapp/sidecar.js"
+    "agentic-procurement": "./dist/mcp/index.js",
+    "agentic-procurement-sidecar": "./dist/mcp/whatsapp/sidecar.js"
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/mcp/index.ts",
     "dev:server": "tsx src/server.ts",
-    "sidecar": "tsx src/whatsapp/sidecar.ts",
-    "start": "node dist/index.js",
+    "sidecar": "tsx src/mcp/whatsapp/sidecar.ts",
+    "start": "node dist/mcp/index.js",
     "start:server": "node dist/server.js",
-    "start:sidecar": "node dist/whatsapp/sidecar.js"
+    "start:sidecar": "node dist/mcp/whatsapp/sidecar.js"
   },
   "keywords": [
     "mcp",

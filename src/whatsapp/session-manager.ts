@@ -316,28 +316,41 @@ async function handleIncomingMessage(userId: string, session: UserSession, msg: 
     if (cached) {
       resolvedKey = cached;
       // replyTo stays as rawSender (@lid) — that's what WhatsApp needs
+      console.log(`[SessionManager] LID cache hit: ${rawSender} → ${resolvedKey}`);
     } else {
       try {
         const contact = await msg.getContact();
-        const phone =
-          (contact?.number && !contact.number.startsWith("1") ? contact.number : null) ||
-          (contact?.id?.user && contact.id.user.length >= 10 && contact.id._serialized?.includes("@c.us")
-            ? contact.id.user
-            : null);
+        // Log the raw contact shape so we can debug resolution failures
+        console.log(`[SessionManager] LID contact shape: number=${JSON.stringify(contact?.number)}, id._serialized=${JSON.stringify(contact?.id?._serialized)}, id.user=${JSON.stringify(contact?.id?.user)}, pushname=${JSON.stringify(contact?.pushname)}`);
+
+        // contact.number is the E.164 phone (e.g. "584241928802").
+        // contact.id.user is the LID's internal numeric ID — NOT a phone number, never use it.
+        // Only accept contact.id._serialized when it's explicitly a @c.us address.
+        const phoneFromNumber = contact?.number && contact.number.length >= 7 ? contact.number : null;
+        const phoneFromId = contact?.id?._serialized?.endsWith("@c.us") ? contact.id.user : null;
+        const phone = phoneFromNumber || phoneFromId;
 
         if (phone) {
           resolvedKey = `${phone}@c.us`;
           session.lidCache.set(rawSender, resolvedKey);
+          console.log(`[SessionManager] LID resolved: ${rawSender} → ${resolvedKey} (via ${phoneFromNumber ? "contact.number" : "contact.id"})`);
         } else {
+          // Last resort: try the chat ID — but only if it looks like a phone (starts with country code digits)
           try {
             const chat = await msg.getChat();
-            const chatId = (chat as any).id?.user;
-            if (chatId && chatId.length >= 10) {
-              resolvedKey = `${chatId}@c.us`;
+            const chatIdUser = (chat as any).id?.user as string | undefined;
+            const chatIdSerialized = (chat as any).id?._serialized as string | undefined;
+            console.log(`[SessionManager] LID chat fallback: id.user=${JSON.stringify(chatIdUser)}, id._serialized=${JSON.stringify(chatIdSerialized)}`);
+            // Only use chat ID if it's a @c.us address (not another @lid)
+            if (chatIdSerialized?.endsWith("@c.us") && chatIdUser && chatIdUser.length >= 7) {
+              resolvedKey = `${chatIdUser}@c.us`;
               session.lidCache.set(rawSender, resolvedKey);
+              console.log(`[SessionManager] LID resolved via chat: ${rawSender} → ${resolvedKey}`);
+            } else {
+              console.warn(`[SessionManager] LID unresolvable: ${rawSender} — keeping raw LID as resolvedKey`);
             }
           } catch {
-            // fallback: keep resolvedKey as rawSender, replyTo already set
+            console.warn(`[SessionManager] LID chat fallback failed for ${rawSender}`);
           }
         }
       } catch (err) {

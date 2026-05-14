@@ -129,11 +129,15 @@ client.on("disconnected", (reason: string) => {
 client.on("message", async (msg: WAMessage) => {
   const rawSender = msg.from;
 
-  // Skip empty messages and status broadcasts
+  // Skip empty messages, status broadcasts, and own sent messages
   if (!msg.body || msg.body.trim().length === 0) return;
   if (rawSender === "status@broadcast") return;
+  if (msg.fromMe) return; // Don't auto-respond to our own outgoing messages
 
   let resolvedKey = rawSender;
+  // replyTo MUST stay as the raw @lid address — WhatsApp uses it for routing.
+  // resolvedKey is only for DB/store lookups.
+  const replyTo = rawSender;
 
   // If sender is a @lid (Linked Device ID), resolve to actual phone number
   if (rawSender.includes("@lid")) {
@@ -147,26 +151,27 @@ client.on("message", async (msg: WAMessage) => {
         // Log all useful contact fields for debugging
         console.error(`[WhatsApp] Contact for LID ${rawSender}: id=${JSON.stringify(contact?.id)}, number=${contact?.number}, pushname=${contact?.pushname}`);
 
-        // Try multiple resolution strategies
-        const phone =
-          // 1. contact.number (sometimes returns the lid number, not phone)
-          (contact?.number && !contact.number.startsWith("1") ? contact.number : null) ||
-          // 2. contact.id.user if it looks like a phone number
-          (contact?.id?.user && contact.id.user.length >= 10 && contact.id._serialized?.includes("@c.us")
-            ? contact.id.user
-            : null);
+        // contact.number holds the LID numeric ID for linked-device contacts, NOT the phone.
+        // contact.id._serialized is the @c.us address with the real phone number when available.
+        // Priority: contact.id (when @c.us) > contact.number (as fallback for legacy contacts)
+        const phoneFromId = contact?.id?._serialized?.endsWith("@c.us") ? contact.id.user : null;
+        const phoneFromNumber = contact?.number && contact.number.length >= 7 ? contact.number : null;
+        const phone = phoneFromId || phoneFromNumber;
 
         if (phone) {
           resolvedKey = `${phone}@c.us`;
           lidCache.set(rawSender, resolvedKey);
-          console.error(`[WhatsApp] Resolved LID ${rawSender} → ${resolvedKey}`);
+          console.error(`[WhatsApp] Resolved LID ${rawSender} → ${resolvedKey} (via ${phoneFromId ? "contact.id" : "contact.number"})`);
         } else {
           // Fallback: try to get the chat and resolve from there
           try {
             const chat = await msg.getChat();
-            const chatId = (chat as any).id?.user;
-            if (chatId && chatId.length >= 10) {
-              resolvedKey = `${chatId}@c.us`;
+            const chatIdUser = (chat as any).id?.user as string | undefined;
+            const chatIdSerialized = (chat as any).id?._serialized as string | undefined;
+            console.error(`[WhatsApp] LID chat fallback: id.user=${JSON.stringify(chatIdUser)}, id._serialized=${JSON.stringify(chatIdSerialized)}`);
+            // Only use if it's a proper @c.us address, not another @lid
+            if (chatIdSerialized?.endsWith("@c.us") && chatIdUser && chatIdUser.length >= 7) {
+              resolvedKey = `${chatIdUser}@c.us`;
               lidCache.set(rawSender, resolvedKey);
               console.error(`[WhatsApp] Resolved LID via chat ${rawSender} → ${resolvedKey}`);
             } else {
@@ -265,14 +270,14 @@ client.on("message", async (msg: WAMessage) => {
       const result = await generateResponse(negContext, conversationHistory, msg.body);
       console.error(`[AutoRespond] AI response: ${result.reply.substring(0, 100)}${result.shouldClose ? ` [CLOSING: ${result.reason}]` : ""}`);
 
-      // Send the AI response via WhatsApp
-      const chatId = resolvedKey.includes("@c.us") ? resolvedKey : `${resolvedKey}@c.us`;
-      await client.sendMessage(chatId, result.reply);
+      // Send the AI response via WhatsApp.
+      // CRITICAL: reply to replyTo (original @lid), NOT resolvedKey (@c.us).
+      // Using the @c.us resolved key for LID contacts causes "No LID for user" errors.
+      await client.sendMessage(replyTo, result.reply);
 
-      // Log the sent message
+      // Track sent message under resolved key for conversation history consistency
       trackSentMessage(resolvedKey, result.reply);
-      console.error(`[AutoRespond] Sent response to ${resolvedKey}`);
-
+      console.error(`[AutoRespond] Sent response to ${replyTo} (resolvedKey=${resolvedKey})`);
       // If negotiation is done, update status and notify self
       if (result.shouldClose) {
         updateNegotiation(phoneNumber, {
