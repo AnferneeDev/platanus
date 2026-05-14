@@ -5,3 +5,4 @@ data/leads.json
 .wwebjs_auth/
 .wwebjs_cache/
 node_modules
+qopencode.json

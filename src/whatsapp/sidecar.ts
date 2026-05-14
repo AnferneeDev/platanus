@@ -6,6 +6,20 @@ import QRCode from "qrcode";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, dirname } from "path";
 import { config } from "dotenv";
+import {
+  getActiveNegotiation,
+  addNegotiation,
+  updateNegotiation,
+  incrementNegotiationRounds,
+  getAllNegotiations,
+  type Negotiation,
+} from "../store/json-store.js";
+import {
+  generateResponse,
+  type ConversationMessage,
+  type NegotiationContext,
+  type AutoResponderResult,
+} from "./auto-responder.js";
 
 config();
 
@@ -177,7 +191,202 @@ client.on("message", async (msg: WAMessage) => {
 
   storeMessage(resolvedKey, storedMsg);
   console.error(`[WhatsApp] Message from ${resolvedKey}: ${msg.body.substring(0, 100)}`);
+
+  // --- Auto-Respond if there's an active negotiation ---
+  const phoneNumber = resolvedKey.replace("@c.us", "");
+  const negotiation = getActiveNegotiation(phoneNumber) || getActiveNegotiation(resolvedKey);
+
+  if (negotiation && negotiation.status === "active") {
+    console.error(`[AutoRespond] Active negotiation found for ${resolvedKey}, generating response...`);
+
+    // Check round limit
+    const currentRound = incrementNegotiationRounds(phoneNumber);
+    if (currentRound > negotiation.maxRounds) {
+      console.error(`[AutoRespond] Max rounds (${negotiation.maxRounds}) reached for ${resolvedKey}. Stopping.`);
+      updateNegotiation(phoneNumber, {
+        status: "stopped",
+        reason: "max_rounds",
+        completedAt: new Date().toISOString(),
+      });
+
+      // Notify self
+      await sendDealSummary(negotiation, {
+        reply: "Negotiation stopped after reaching max rounds.",
+        shouldClose: true,
+        reason: "max_rounds",
+        detectedLanguage: "en",
+      }, resolvedKey);
+      return;
+    }
+
+    // Build conversation history from stored messages
+    const allMessages = incomingMessages[resolvedKey] || [];
+    const history: ConversationMessage[] = [];
+
+    // We need to interleave outbound (assistant) and inbound (user) messages
+    // Outbound messages are tracked in the store but not in incomingMessages
+    // For simplicity, use incomingMessages as "user" turns and reconstruct
+    // For now, we'll pass all prior inbound messages as context
+    // The auto-responder will see the full thread
+
+    // Get all messages for this contact from messages.json (inbound)
+    // and reconstruct what we sent (from sidecar send logs)
+    const sentMessages = sentMessageLog[resolvedKey] || [];
+    
+    // Interleave sent (assistant) and received (user) messages by timestamp
+    const allTurns: { role: "assistant" | "user"; content: string; ts: string }[] = [];
+    
+    for (const sm of sentMessages) {
+      allTurns.push({ role: "assistant", content: sm.body, ts: sm.timestamp });
+    }
+    for (const im of allMessages) {
+      // Skip the current message — it's passed separately as newReply
+      if (im.timestamp === storedMsg.timestamp && im.body === storedMsg.body) continue;
+      allTurns.push({ role: "user", content: im.body, ts: im.timestamp });
+    }
+
+    // Sort by timestamp
+    allTurns.sort((a, b) => a.ts.localeCompare(b.ts));
+
+    const conversationHistory: ConversationMessage[] = allTurns.map((t) => ({
+      role: t.role,
+      content: t.content,
+    }));
+
+    const negContext: NegotiationContext = {
+      businessName: negotiation.businessName,
+      phone: phoneNumber,
+      context: negotiation.context,
+      objective: negotiation.objective,
+      brief: negotiation.brief || `BRIEF: ${negotiation.context}\nOBJECTIVE: ${negotiation.objective}`,
+    };
+
+    try {
+      const result = await generateResponse(negContext, conversationHistory, msg.body);
+      console.error(`[AutoRespond] AI response: ${result.reply.substring(0, 100)}${result.shouldClose ? ` [CLOSING: ${result.reason}]` : ""}`);
+
+      // Send the AI response via WhatsApp
+      const chatId = resolvedKey.includes("@c.us") ? resolvedKey : `${resolvedKey}@c.us`;
+      await client.sendMessage(chatId, result.reply);
+
+      // Log the sent message
+      trackSentMessage(resolvedKey, result.reply);
+      console.error(`[AutoRespond] Sent response to ${resolvedKey}`);
+
+      // If negotiation is done, update status and notify self
+      if (result.shouldClose) {
+        updateNegotiation(phoneNumber, {
+          status: result.reason === "deal_accepted" ? "completed" : "rejected",
+          reason: result.reason,
+          completedAt: new Date().toISOString(),
+        });
+        console.error(`[AutoRespond] Negotiation ${result.reason} for ${resolvedKey}`);
+        // Send deal summary to own WhatsApp
+        const refreshedNeg = getActiveNegotiation(phoneNumber) || negotiation;
+        refreshedNeg.status = result.reason === "deal_accepted" ? "completed" : "rejected";
+        await sendDealSummary(refreshedNeg, result, resolvedKey);
+      }
+    } catch (err) {
+      console.error(`[AutoRespond] Error generating/sending response: ${err}`);
+    }
+  }
 });
+
+// --- Self-Notification: Send deal summary to own WhatsApp ---
+
+async function generateSummaryText(negotiation: Negotiation, result: AutoResponderResult, resolvedKey: string): Promise<string> {
+  const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || "";
+  if (!DEEPSEEK_KEY) {
+    return `${result.reason === "deal_accepted" ? "✅" : "❌"} ${result.reason}\n${negotiation.businessName || resolvedKey.replace("@c.us", "")}\n${negotiation.phone}\n${result.reply}\n${negotiation.rounds}/${negotiation.maxRounds} rounds`;
+  }
+
+  const statusLabel = result.reason === "deal_accepted"
+    ? "ACCEPTED"
+    : result.reason === "deal_rejected"
+      ? "REJECTED"
+      : "MAX ROUNDS";
+
+  try {
+    const res = await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DEEPSEEK_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "deepseek-chat",
+        max_tokens: 250,
+        temperature: 0.3,
+        messages: [
+          {
+            role: "system",
+            content: `You format negotiation result summaries. CRITICAL: write the ENTIRE summary in the SAME LANGUAGE as the negotiation context. Detect the context language and use it for all labels. No English unless the context is English. No explanations — output only the summary text.`,
+          },
+          {
+            role: "user",
+            content: `Generate a brief summary of this completed negotiation. Write all labels and text in the same language as the CONTEXT below.
+
+Status: ${statusLabel} (${result.reason})
+Business: ${negotiation.businessName || resolvedKey.replace("@c.us", "")} (${negotiation.phone})
+Context: ${negotiation.context}
+Objective: ${negotiation.objective}
+Final reply: ${result.reply}
+Total rounds: ${negotiation.rounds}/${negotiation.maxRounds}
+
+Format like this example (but translated to match context language):
+✅ TRATO CERRADO
+Negocio: Panadería X (584141234567)
+Contexto: Torta para 80 personas...
+Objetivo: Precio bajo $100...
+Última respuesta: Perfecto, quedamos en $80
+Rondas: 3/10`,
+          },
+        ],
+      }),
+    });
+
+    if (res.ok) {
+      const data = (await res.json()) as { choices: { message: { content: string } }[] };
+      return data.choices?.[0]?.message?.content?.trim() || `${statusLabel}: ${negotiation.phone}`;
+    }
+  } catch (err) {
+    console.error(`[Notify] Summary generation failed: ${err}`);
+  }
+
+  // Fallback
+  return `${statusLabel}\n${negotiation.businessName || resolvedKey} (${negotiation.phone})\n${negotiation.context.substring(0, 100)}\n${result.reply}`;
+}
+
+async function sendDealSummary(negotiation: Negotiation, result: AutoResponderResult, resolvedKey: string): Promise<void> {
+  try {
+    const ownNumber = client.info?.wid?.user;
+    if (!ownNumber) {
+      console.error("[Notify] Cannot get own WhatsApp number.");
+      return;
+    }
+
+    const ownChatId = `${ownNumber}@c.us`;
+    const summary = await generateSummaryText(negotiation, result, resolvedKey);
+
+    await client.sendMessage(ownChatId, summary);
+    console.error(`[Notify] Deal summary sent to self (${ownChatId})`);
+  } catch (err) {
+    console.error(`[Notify] Failed to send deal summary: ${err}`);
+  }
+}
+
+// --- Sent Message Tracking (for conversation history) ---
+const sentMessageLog: Record<string, { body: string; timestamp: string }[]> = {};
+
+function trackSentMessage(resolvedKey: string, body: string): void {
+  if (!sentMessageLog[resolvedKey]) {
+    sentMessageLog[resolvedKey] = [];
+  }
+  sentMessageLog[resolvedKey].push({
+    body,
+    timestamp: new Date().toISOString(),
+  });
+}
 
 // --- Express Server ---
 
@@ -256,6 +465,7 @@ app.post("/send", async (req, res) => {
   try {
     const chatId = number.includes("@c.us") ? number : `${number}@c.us`;
     await client.sendMessage(chatId, message);
+    trackSentMessage(chatId, message);
     console.error(`[WhatsApp] Sent to ${chatId}: ${message.substring(0, 100)}`);
     res.json({ success: true, to: chatId, message });
   } catch (err) {
@@ -288,6 +498,77 @@ app.get("/replies", (req, res) => {
     }
   }
   res.json({ replies: result });
+});
+
+// --- Negotiation Management Endpoints ---
+
+// Start a new autonomous negotiation
+app.post("/negotiations", (req, res) => {
+  const { phone, phoneFormatted, businessName, context, objective, brief, maxRounds } = req.body as {
+    phone: string;
+    phoneFormatted: string;
+    businessName?: string;
+    context: string;
+    objective: string;
+    brief?: string;
+    maxRounds?: number;
+  };
+
+  if (!phone || !context || !objective) {
+    res.status(400).json({ error: "Missing required fields: phone, context, objective" });
+    return;
+  }
+
+  const negotiation: Negotiation = {
+    phone,
+    phoneFormatted: phoneFormatted || `${phone.replace(/\D/g, "")}@c.us`,
+    businessName,
+    context,
+    objective,
+    brief: brief || `BRIEF: ${context}\nOBJECTIVE: ${objective}`,
+    status: "active",
+    rounds: 0,
+    maxRounds: maxRounds || 15,
+    startedAt: new Date().toISOString(),
+  };
+
+  addNegotiation(negotiation);
+  console.error(`[Negotiation] Started for ${phone}: ${context.substring(0, 80)}`);
+  res.json({ success: true, negotiation });
+});
+
+// List all negotiations
+app.get("/negotiations", (_req, res) => {
+  const negotiations = getAllNegotiations();
+  res.json({ negotiations });
+});
+
+// Stop a negotiation
+app.delete("/negotiations/:phone", (req, res) => {
+  const phone = req.params.phone;
+  const updated = updateNegotiation(phone, {
+    status: "stopped",
+    reason: "manual_stop",
+    completedAt: new Date().toISOString(),
+  });
+
+  if (!updated) {
+    // Try with @c.us suffix
+    const updated2 = updateNegotiation(`${phone}@c.us`, {
+      status: "stopped",
+      reason: "manual_stop",
+      completedAt: new Date().toISOString(),
+    });
+    if (!updated2) {
+      res.status(404).json({ error: "Negotiation not found" });
+      return;
+    }
+    res.json({ success: true, negotiation: updated2 });
+    return;
+  }
+
+  console.error(`[Negotiation] Stopped for ${phone}`);
+  res.json({ success: true, negotiation: updated });
 });
 
 // --- Start ---

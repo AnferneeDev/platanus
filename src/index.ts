@@ -8,6 +8,8 @@ import { connectWhatsapp } from "./tools/connect-whatsapp.js";
 import { findLocalBusiness } from "./tools/find-local-business.js";
 import { sendWhatsappMessage } from "./tools/send-whatsapp-message.js";
 import { checkWhatsappReplies } from "./tools/check-whatsapp-replies.js";
+import { startNegotiation } from "./tools/start-negotiation.js";
+import { stopNegotiation } from "./tools/stop-negotiation.js";
 
 config();
 
@@ -92,14 +94,63 @@ server.tool(
   }
 );
 
+// Tool 5: Start Autonomous Negotiation
+server.tool(
+  "start_negotiation",
+  "Start a fully autonomous negotiation with a business via WhatsApp. The AI auto-responds to all replies using DeepSeek, negotiating toward your objective until a deal is closed, rejected, or max rounds (default 15) are reached. You walk away and it handles everything.",
+  {
+    phone_number: z.string().describe("Phone number in international format"),
+    context: z.string().describe(
+      "What you need — describe the event/order. E.g. 'Catering for 80 person party in Caracas, May 24'"
+    ),
+    objective: z.string().describe(
+      "Your negotiation goal. E.g. 'Best price under $8000, must include setup and waiters'"
+    ),
+    business_name: z.string().optional().describe("Name of the business"),
+    initial_message: z.string().optional().describe("Custom first message to send"),
+    max_rounds: z
+      .number()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe("Max back-and-forth rounds (default 15)"),
+  },
+  async ({ phone_number, context, objective, business_name, initial_message, max_rounds }) => {
+    const result = await startNegotiation(
+      phone_number,
+      context,
+      objective,
+      business_name,
+      initial_message,
+      max_rounds ?? 15
+    );
+    return { content: [{ type: "text", text: result }] };
+  }
+);
+
+// Tool 6: Stop Negotiation / List Negotiations
+server.tool(
+  "stop_negotiation",
+  "Stop an active autonomous negotiation, or list all negotiations and their statuses if no phone number is provided.",
+  {
+    phone_number: z
+      .string()
+      .optional()
+      .describe("Phone number to stop negotiating with. Omit to list all negotiations."),
+  },
+  async ({ phone_number }) => {
+    const result = await stopNegotiation(phone_number);
+    return { content: [{ type: "text", text: result }] };
+  }
+);
+
 // --- Start ---
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // All logging goes to stderr to avoid corrupting the stdio JSON-RPC channel
   console.error("[MCP] Agentic Procurement server started.");
-  console.error("[MCP] Tools: connect_whatsapp, find_local_business, send_whatsapp_message, check_whatsapp_replies");
+  console.error("[MCP] Tools: connect_whatsapp, find_local_business, send_whatsapp_message, check_whatsapp_replies, start_negotiation, stop_negotiation");
 }
 
 main().catch((err) => {

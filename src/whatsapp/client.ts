@@ -55,3 +55,42 @@ export async function getReplies(numbers?: string[]): Promise<RepliesResult> {
   const query = numbers && numbers.length > 0 ? `?numbers=${numbers.join(",")}` : "";
   return fetchJSON<RepliesResult>(`/replies${query}`);
 }
+
+// --- Negotiation Management ---
+
+export interface NegotiationConfig {
+  phone: string;
+  phoneFormatted: string;
+  businessName?: string;
+  context: string;
+  objective: string;
+  brief: string;
+  maxRounds?: number;
+}
+
+export interface NegotiationResult {
+  success: boolean;
+  negotiation: any;
+}
+
+export interface NegotiationsList {
+  negotiations: any[];
+}
+
+export async function startNegotiation(config: NegotiationConfig): Promise<NegotiationResult> {
+  return fetchJSON<NegotiationResult>("/negotiations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+}
+
+export async function listNegotiations(): Promise<NegotiationsList> {
+  return fetchJSON<NegotiationsList>("/negotiations");
+}
+
+export async function stopNegotiation(phone: string): Promise<NegotiationResult> {
+  return fetchJSON<NegotiationResult>(`/negotiations/${encodeURIComponent(phone)}`, {
+    method: "DELETE",
+  });
+}
